@@ -1,0 +1,12 @@
+2026-02-10 22:59:51.416 EST [22293] LOG:  starting PostgreSQL 17.7 on aarch64-apple-darwin25.2.0, compiled by clang version 21.1.8, 64-bit
+2026-02-10 22:59:51.420 EST [22293] LOG:  listening on IPv6 address "::1", port 5432
+2026-02-10 22:59:51.420 EST [22293] LOG:  listening on IPv4 address "127.0.0.1", port 5432
+2026-02-10 22:59:51.420 EST [22293] LOG:  listening on Unix socket "/tmp/.s.PGSQL.5432"
+2026-02-10 22:59:51.427 EST [22296] LOG:  database system was shut down at 2026-02-10 22:59:51 EST
+2026-02-10 22:59:51.432 EST [22293] LOG:  database system is ready to accept connections
+2026-02-10 23:02:26.735 EST [23576] ERROR:  relation "nodes" does not exist at character 212
+2026-02-10 23:02:26.735 EST [23576] STATEMENT:  SELECT n0."id", n0."hostname", n0."status", n0."cpu_total", n0."memory_total", n0."cpu_used", n0."memory_used", n0."hypervisor", n0."capabilities", n0."last_heartbeat_at", n0."inserted_at", n0."updated_at" FROM "nodes" AS n0
+2026-02-10 23:04:51.427 EST [22294] LOG:  checkpoint starting: time
+2026-02-10 23:06:32.397 EST [22294] LOG:  checkpoint complete: wrote 996 buffers (6.1%); 0 WAL file(s) added, 0 removed, 0 recycled; write=100.961 s, sync=0.006 s, total=100.970 s; sync files=333, longest=0.001 s, average=0.001 s; distance=4714 kB, estimate=4714 kB; lsn=0/19AD858, redo lsn=0/19AD7C8
+2026-02-10 23:09:51.421 EST [22294] LOG:  checkpoint starting: time
+2026-02-10 23:09:53.972 EST [22294] LOG:  checkpoint complete: wrote 27 buffers (0.2%); 0 WAL file(s) added, 0 removed, 0 recycled; write=2.547 s, sync=0.001 s, total=2.552 s; sync files=18, longest=0.001 s, average=0.001 s; distance=13 kB, estimate=4244 kB; lsn=0/19B0FA0, redo lsn=0/19B0F48

@@ -1,0 +1,33 @@
+% pgtune decision rules
+% Extends anytune's shipped detection rules with PostgreSQL-specific logic.
+
+% Query-level problems → optimize queries (indexes + hints)
+should_optimize(queries) :-
+    query_regression(_, same_load, _),
+    not workload_shift().
+
+% General metric degradation → optimize knobs
+should_optimize(knobs) :-
+    metric_degraded(_),
+    not query_regression(_, _, _).
+
+% Both signals → full holistic optimization
+should_optimize(holistic) :-
+    metric_degraded(_),
+    query_regression(_, _, _).
+
+% Confidence gating — don't act on weak signals
+action_ready(Action) :-
+    should_optimize(Action),
+    high_confidence().
+
+% Cooldown — don't optimize again within 5 minutes of last run
+suppress_action() :-
+    last_optimization_time(T),
+    now(Now),
+    Now - T < 300.
+
+% Final trigger: ready and not suppressed
+should_act(Action) :-
+    action_ready(Action),
+    not suppress_action().

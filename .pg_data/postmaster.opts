@@ -1,0 +1,1 @@
+/nix/store/vx9gmg88b48qjf1w2q6czfx44jbh48nw-postgresql-17.7/bin/postgres "-D" "/Users/samrose/pgtune/.pg_data" "-k" "/tmp"

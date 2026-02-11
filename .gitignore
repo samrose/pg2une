@@ -1,0 +1,14 @@
+/_build/
+/deps/
+/doc/
+/.fetch
+erl_crash.dump
+*.ez
+*.beam
+/tmp/
+.nix-mix/
+.nix-hex/
+.venv/
+.elixir_ls/
+/config/*.secret.exs
+result
