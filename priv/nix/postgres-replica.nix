@@ -9,7 +9,7 @@
     hypervisor = "qemu";
   };
 
-  networking.hostName = "pgtune-postgres-replica";
+  networking.hostName = "pg2une-postgres-replica";
   networking.firewall.allowedTCPPorts = [ 5432 ];
 
   services.postgresql = {

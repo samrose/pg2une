@@ -1,18 +1,18 @@
-defmodule Pgtune.MixProject do
+defmodule Pg2une.MixProject do
   use Mix.Project
 
   @version "0.1.0"
 
   def project do
     [
-      app: :pgtune,
+      app: :pg2une,
       version: @version,
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       aliases: aliases(),
       elixirc_paths: elixirc_paths(Mix.env()),
-      name: "pgtune",
+      name: "pg2une",
       description: "PostgreSQL auto-tuner on mxc microVMs"
     ]
   end
@@ -20,7 +20,7 @@ defmodule Pgtune.MixProject do
   def application do
     [
       extra_applications: [:logger],
-      mod: {Pgtune.Application, []}
+      mod: {Pg2une.Application, []}
     ]
   end
 

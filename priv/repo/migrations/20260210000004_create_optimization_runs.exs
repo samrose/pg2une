@@ -1,4 +1,4 @@
-defmodule Pgtune.Repo.Migrations.CreateOptimizationRuns do
+defmodule Pg2une.Repo.Migrations.CreateOptimizationRuns do
   use Ecto.Migration
 
   def change do

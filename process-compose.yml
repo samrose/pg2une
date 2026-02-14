@@ -1,0 +1,43 @@
+version: "0.5"
+
+processes:
+  postgres-init:
+    command: |
+      if [ ! -f .pg_data/PG_VERSION ]; then
+        echo "Initializing PostgreSQL data directory..."
+        initdb -D .pg_data --no-locale --encoding=UTF8
+      else
+        echo "PostgreSQL data directory already initialized."
+      fi
+    availability:
+      restart: "no"
+
+  postgres:
+    command: postgres -D .pg_data
+    depends_on:
+      postgres-init:
+        condition: process_completed_successfully
+    readiness_probe:
+      exec:
+        command: pg_isready -h localhost
+      initial_delay_seconds: 1
+      period_seconds: 2
+      failure_threshold: 10
+    shutdown:
+      signal: SIGINT
+
+  db-setup:
+    command: mix deps.get && mix ecto.setup
+    depends_on:
+      postgres:
+        condition: process_healthy
+    availability:
+      restart: "no"
+
+  app:
+    command: mix run --no-halt
+    depends_on:
+      db-setup:
+        condition: process_completed_successfully
+    shutdown:
+      signal: SIGINT

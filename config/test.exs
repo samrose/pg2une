@@ -1,14 +1,14 @@
 import Config
 
-config :pgtune, Pgtune.Repo,
-  database: "pgtune_test#{System.get_env("MIX_TEST_PARTITION")}",
+config :pg2une, Pg2une.Repo,
+  database: "pg2une_test#{System.get_env("MIX_TEST_PARTITION")}",
   socket_dir: "/tmp",
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: 10
 
 # Configure mxc's Repo so it doesn't crash on startup (transitive dep)
 config :mxc, Mxc.Repo,
-  database: "pgtune_test#{System.get_env("MIX_TEST_PARTITION")}",
+  database: "pg2une_test#{System.get_env("MIX_TEST_PARTITION")}",
   socket_dir: "/tmp",
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: 2

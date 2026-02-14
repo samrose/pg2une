@@ -1,5 +1,5 @@
 {
-  description = "pgtune - PostgreSQL auto-tuner on mxc microVMs";
+  description = "pg2une - PostgreSQL auto-tuner on mxc microVMs";
 
   nixConfig = {
     extra-substituters = [ "https://microvm.cachix.org" ];
@@ -30,6 +30,7 @@
             pkgs.rebar3
             pkgs.python312
             pkgs.postgresql_17
+            pkgs.process-compose
           ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
             pkgs.inotify-tools
           ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [

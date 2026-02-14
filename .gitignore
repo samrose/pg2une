@@ -12,3 +12,4 @@ erl_crash.dump
 .elixir_ls/
 /config/*.secret.exs
 result
+.pg_data/

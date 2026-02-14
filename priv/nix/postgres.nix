@@ -8,7 +8,7 @@
     hypervisor = "qemu";
   };
 
-  networking.hostName = "pgtune-postgres";
+  networking.hostName = "pg2une-postgres";
   networking.firewall.allowedTCPPorts = [ 5432 ];
 
   services.postgresql = {
@@ -19,7 +19,7 @@
     ensureDatabases = [ "postgres" ];
     ensureUsers = [
       {
-        name = "pgtune";
+        name = "pg2une";
         ensureDBOwnership = true;
         ensureClauses.superuser = true;
       }

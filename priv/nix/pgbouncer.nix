@@ -8,7 +8,7 @@
     hypervisor = "qemu";
   };
 
-  networking.hostName = "pgtune-pgbouncer";
+  networking.hostName = "pg2une-pgbouncer";
   networking.firewall.allowedTCPPorts = [ 6432 ];
 
   services.pgbouncer = {
@@ -29,7 +29,7 @@
       # Default: route everything to primary
       # DeploymentManager updates this at runtime
       databases = {
-        "*" = "host=pgtune-postgres port=5432 dbname=postgres";
+        "*" = "host=pg2une-postgres port=5432 dbname=postgres";
       };
     };
   };

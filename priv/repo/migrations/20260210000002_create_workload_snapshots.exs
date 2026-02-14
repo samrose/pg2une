@@ -1,4 +1,4 @@
-defmodule Pgtune.Repo.Migrations.CreateWorkloadSnapshots do
+defmodule Pg2une.Repo.Migrations.CreateWorkloadSnapshots do
   use Ecto.Migration
 
   def change do

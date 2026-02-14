@@ -1,5 +1,5 @@
 import Config
 
-config :pgtune, ecto_repos: [Pgtune.Repo]
+config :pg2une, ecto_repos: [Pg2une.Repo]
 
 import_config "#{config_env()}.exs"
