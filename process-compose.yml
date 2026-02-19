@@ -6,6 +6,9 @@ processes:
       if [ ! -f .pg_data/PG_VERSION ]; then
         echo "Initializing PostgreSQL data directory..."
         initdb -D .pg_data --no-locale --encoding=UTF8
+        # Enable pg_stat_statements for metrics collection
+        echo "shared_preload_libraries = 'pg_stat_statements'" >> .pg_data/postgresql.conf
+        echo "pg_stat_statements.track = 'all'" >> .pg_data/postgresql.conf
       else
         echo "PostgreSQL data directory already initialized."
       fi
@@ -19,15 +22,21 @@ processes:
         condition: process_completed_successfully
     readiness_probe:
       exec:
-        command: pg_isready -h localhost
+        command: pg_isready -h localhost -d postgres
       initial_delay_seconds: 1
       period_seconds: 2
       failure_threshold: 10
     shutdown:
-      signal: SIGINT
+      signal: 2
 
   db-setup:
-    command: mix deps.get && mix ecto.setup
+    command: |
+      mix deps.get && mix ecto.setup
+      # Create mxc database and run its migrations
+      createdb -h localhost mxc_dev 2>/dev/null || true
+      mix ecto.migrate --repo Mxc.Repo 2>/dev/null || true
+      # Create pg_stat_statements extension on the target database
+      psql -h localhost -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" 2>/dev/null || true
     depends_on:
       postgres:
         condition: process_healthy
@@ -40,4 +49,4 @@ processes:
       db-setup:
         condition: process_completed_successfully
     shutdown:
-      signal: SIGINT
+      signal: 2

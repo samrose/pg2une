@@ -11,7 +11,7 @@ defmodule Pg2une.MetricsStore do
   alias Pg2une.Schemas.{SystemSnapshot, WorkloadSnapshot, OptimizerObservation, OptimizationRun}
 
   def record_system_snapshot(metrics) when is_map(metrics) do
-    attrs = Map.put(metrics, :snapshot_time, DateTime.utc_now())
+    attrs = Map.put(metrics, "snapshot_time", DateTime.utc_now())
 
     %SystemSnapshot{}
     |> SystemSnapshot.changeset(attrs)

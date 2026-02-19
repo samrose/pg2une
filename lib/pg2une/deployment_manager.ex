@@ -1,11 +1,13 @@
 defmodule Pg2une.DeploymentManager do
   @moduledoc """
-  Orchestrates blue-green canary deployment via mxc microVMs.
+  Orchestrates PostgreSQL configuration optimization.
 
-  FSM states: idle → capturing_baseline → launching_canary → applying_config →
-  routing_traffic → validating → promoting | rolling_back → idle
+  Supports two modes:
+  - `:direct` — applies config directly to the target PG via ALTER SYSTEM (local dev)
+  - `:canary` — blue-green canary deployment via mxc microVMs (production)
 
-  All infrastructure (primary PG, replica PG, PgBouncer) runs as mxc workloads.
+  FSM states: idle → capturing_baseline → running_optimizer → applying_config →
+  validating → promoting | rolling_back → idle
   """
 
   use GenServer
@@ -16,6 +18,7 @@ defmodule Pg2une.DeploymentManager do
 
   defstruct [
     :state,
+    :mode,
     :current_run,
     :canary_workload_id,
     :pgbouncer_workload_id,
@@ -48,8 +51,9 @@ defmodule Pg2une.DeploymentManager do
   # Server
 
   @impl true
-  def init(_opts) do
-    {:ok, %__MODULE__{state: :idle}}
+  def init(opts) do
+    mode = Keyword.get(opts, :mode, default_mode())
+    {:ok, %__MODULE__{state: :idle, mode: mode}}
   end
 
   @impl true
@@ -63,11 +67,16 @@ defmodule Pg2une.DeploymentManager do
 
   @impl true
   def handle_call({:start_optimization, action}, _from, %{state: :idle} = state) do
-    Logger.info("DeploymentManager: starting #{action} optimization")
+    Logger.info("DeploymentManager: starting #{action} optimization (mode=#{state.mode})")
 
     state = %{state | state: :capturing_baseline, action: action}
 
-    case run_optimization_pipeline(state) do
+    pipeline = case state.mode do
+      :direct -> &run_direct_pipeline/1
+      :canary -> &run_canary_pipeline/1
+    end
+
+    case pipeline.(state) do
       {:ok, result, new_state} ->
         {:reply, {:ok, result}, %{new_state | state: :idle}}
 
@@ -93,12 +102,110 @@ defmodule Pg2une.DeploymentManager do
   @impl true
   def handle_call(:teardown, _from, state) do
     do_teardown(state)
-    {:reply, :ok, %__MODULE__{state: :idle}}
+    {:reply, :ok, %__MODULE__{state: :idle, mode: state.mode}}
   end
 
-  # Pipeline
+  # ── Direct Pipeline ──────────────────────────────────────────────────
 
-  defp run_optimization_pipeline(state) do
+  defp run_direct_pipeline(state) do
+    with {:ok, state} <- capture_baseline(state),
+         {:ok, config, state} <- run_optimizer(state),
+         {:ok, config} <- filter_restart_params(config),
+         {:ok, state} <- apply_config_direct(config, state),
+         {:ok, result, result_metrics, state} <- wait_and_validate_direct(state) do
+      case result do
+        :improved ->
+          improvement_pct = calculate_improvement(state.baseline_metrics, result_metrics)
+          record_result(state, config, :promoted, result_metrics, improvement_pct)
+
+          {:ok, %{status: :promoted, config: config, improvement_pct: improvement_pct}, state}
+
+        :regressed ->
+          rollback_direct(config, state)
+          record_result(state, config, :rolled_back, result_metrics, nil)
+
+          {:ok, %{status: :rolled_back}, state}
+      end
+    else
+      {:error, reason, state} ->
+        {:error, reason, state}
+
+      {:error, reason} ->
+        {:error, reason, state}
+    end
+  end
+
+  defp filter_restart_params(config) do
+    case Pg2une.PgConnector.params_requiring_restart(config) do
+      {:ok, restart_keys} ->
+        if restart_keys != [] do
+          Logger.info("DeploymentManager: skipping restart-only params: #{inspect(restart_keys)}")
+        end
+
+        filtered = Map.drop(config, restart_keys)
+
+        if map_size(filtered) == 0 do
+          {:error, :all_params_require_restart}
+        else
+          {:ok, filtered}
+        end
+
+      {:error, reason} ->
+        Logger.warning("DeploymentManager: couldn't check restart params: #{inspect(reason)}, applying all reload-safe")
+        # Fall back to a known-safe list
+        safe_keys = ["work_mem_mb", "effective_cache_size_mb", "maintenance_work_mem_mb", "random_page_cost"]
+        {:ok, Map.take(config, safe_keys)}
+    end
+  end
+
+  defp apply_config_direct(config, state) do
+    Logger.info("DeploymentManager: applying config directly via ALTER SYSTEM")
+    state = %{state | state: :applying_config, optimized_config: config}
+
+    case Pg2une.PgConnector.apply_config(config) do
+      {:ok, _applied} ->
+        {:ok, state}
+
+      {:error, reason} ->
+        {:error, {:apply_failed, reason}, state}
+    end
+  end
+
+  defp wait_and_validate_direct(state) do
+    Logger.info("DeploymentManager: waiting #{@stabilization_wait}ms for stabilization")
+    state = %{state | state: :validating}
+
+    Process.sleep(@stabilization_wait)
+
+    current = Pg2une.MetricsStore.recent_system_metrics(1)
+
+    if current == [] do
+      {:ok, :improved, state.baseline_metrics, state}
+    else
+      result_metrics = average_metrics(current)
+      result = compare_metrics(state.baseline_metrics, result_metrics)
+      {:ok, result, result_metrics, state}
+    end
+  end
+
+  defp rollback_direct(config, state) do
+    Logger.info("DeploymentManager: rolling back — resetting config")
+    state = %{state | state: :rolling_back}
+
+    case Pg2une.PgConnector.rollback_config(config) do
+      :ok ->
+        Logger.info("DeploymentManager: rollback complete")
+
+      {:error, reason} ->
+        Logger.error("DeploymentManager: rollback failed: #{inspect(reason)}")
+    end
+
+    state
+  end
+
+  # ── Canary Pipeline ──────────────────────────────────────────────────
+
+  defp run_canary_pipeline(state) do
     with {:ok, state} <- capture_baseline(state),
          {:ok, config, state} <- run_optimizer(state),
          {:ok, state} <- launch_canary(state),
@@ -122,6 +229,8 @@ defmodule Pg2une.DeploymentManager do
     end
   end
 
+  # ── Shared Steps ─────────────────────────────────────────────────────
+
   defp capture_baseline(state) do
     Logger.info("DeploymentManager: capturing baseline metrics")
     metrics = Pg2une.MetricsStore.recent_system_metrics(2)
@@ -136,6 +245,7 @@ defmodule Pg2une.DeploymentManager do
 
   defp run_optimizer(state) do
     Logger.info("DeploymentManager: running optimizer (#{state.action})")
+    state = %{state | state: :running_optimizer}
 
     case Anytune.optimize(:pg2une, n_iterations: 30) do
       {:ok, config} ->
@@ -146,13 +256,35 @@ defmodule Pg2une.DeploymentManager do
     end
   end
 
+  defp compare_metrics(baseline, current) do
+    tps_change = safe_pct_change(baseline.tps, current.tps)
+    latency_change = safe_pct_change(baseline.latency_p99, current.latency_p99)
+
+    cond do
+      latency_change > 0.10 -> :regressed
+      tps_change < -0.10 -> :regressed
+      true -> :improved
+    end
+  end
+
+  defp calculate_improvement(baseline, result) do
+    tps_improvement = safe_pct_change(baseline.tps, result.tps)
+    latency_improvement = -safe_pct_change(baseline.latency_p99, result.latency_p99)
+
+    # Weighted average: TPS improvement (60%) + latency improvement (40%)
+    improvement = tps_improvement * 0.6 + latency_improvement * 0.4
+    Float.round(improvement * 100, 2)
+  end
+
+  # ── Canary-Only Steps ────────────────────────────────────────────────
+
   defp launch_canary(state) do
     Logger.info("DeploymentManager: launching canary microVM")
     state = %{state | state: :launching_canary}
 
     workload_spec = %{
       type: "microvm",
-      command: "pg2une-postgres-replica",
+      command: vm_config_name("pg2une-postgres-replica"),
       cpu: 4,
       memory_mb: 2048,
       constraints: %{"microvm" => "true"}
@@ -171,8 +303,6 @@ defmodule Pg2une.DeploymentManager do
     Logger.info("DeploymentManager: applying config to canary")
     state = %{state | state: :applying_config, optimized_config: config}
 
-    # Connect to canary and apply knobs via ALTER SYSTEM
-    # In practice, we'd get the canary's IP from mxc workload info
     knob_statements =
       config
       |> Enum.filter(fn {key, _val} -> String.starts_with?(key, "shared_buffers") or
@@ -225,28 +355,13 @@ defmodule Pg2une.DeploymentManager do
     end
   end
 
-  defp compare_metrics(baseline, current) do
-    tps_change = safe_pct_change(baseline.tps, current.tps)
-    latency_change = safe_pct_change(baseline.latency_p99, current.latency_p99)
-
-    cond do
-      latency_change > 0.10 -> :regressed
-      tps_change < -0.10 -> :regressed
-      true -> :improved
-    end
-  end
-
   defp promote(config, state) do
     Logger.info("DeploymentManager: promoting — applying config to primary")
     state = %{state | state: :promoting}
 
-    # Apply knobs to primary
     Logger.info("DeploymentManager: would apply #{map_size(config)} settings to primary")
 
-    # Route 100% back to primary
     Pg2une.PgBouncer.update_routing(state.pgbouncer_workload_id, %{canary_pct: 0})
-
-    # Stop canary
     cleanup_canary(state)
 
     {:ok, %{state | state: :idle, canary_workload_id: nil}}
@@ -267,26 +382,31 @@ defmodule Pg2une.DeploymentManager do
   defp cleanup_canary(%{canary_workload_id: id}) do
     Logger.info("DeploymentManager: cleaning up canary #{id}")
 
-    case Mxc.Coordinator.stop_workload(id) do
-      :ok -> :ok
-      {:error, reason} -> Logger.warning("Failed to stop canary: #{inspect(reason)}")
+    try do
+      case Mxc.Coordinator.stop_workload(id) do
+        :ok -> :ok
+        {:error, reason} -> Logger.warning("Failed to stop canary: #{inspect(reason)}")
+      end
+    rescue
+      e -> Logger.warning("Exception stopping canary #{id}: #{inspect(e)}")
+    catch
+      kind, reason -> Logger.warning("Error stopping canary #{id}: #{kind} #{inspect(reason)}")
     end
   end
 
   defp do_ensure_infrastructure(state) do
-    # Launch primary PG and PgBouncer if not running
     Logger.info("DeploymentManager: ensuring infrastructure")
 
     primary_spec = %{
       type: "microvm",
-      command: "pg2une-postgres",
+      command: vm_config_name("pg2une-postgres"),
       cpu: 4,
       memory_mb: 2048
     }
 
     pgbouncer_spec = %{
       type: "microvm",
-      command: "pg2une-pgbouncer",
+      command: vm_config_name("pg2une-pgbouncer"),
       cpu: 1,
       memory_mb: 256
     }
@@ -306,13 +426,28 @@ defmodule Pg2une.DeploymentManager do
     end
   end
 
-  defp record_result(state, config, status) do
-    Pg2une.MetricsStore.create_optimization_run(%{
+  # record_result with optional result_metrics and improvement_pct
+  defp record_result(state, config, status, result_metrics \\ nil, improvement_pct \\ nil) do
+    attrs = %{
       action: to_string(state.action),
       status: to_string(status),
       config: config,
       baseline_metrics: state.baseline_metrics
-    })
+    }
+
+    attrs = if result_metrics, do: Map.put(attrs, :result_metrics, result_metrics), else: attrs
+    attrs = if improvement_pct, do: Map.put(attrs, :improvement_pct, improvement_pct), else: attrs
+
+    Pg2une.MetricsStore.create_optimization_run(attrs)
+  end
+
+  defp default_mode do
+    Application.get_env(:pg2une, :deployment_mode, :direct)
+  end
+
+  defp vm_config_name(base) do
+    arch = Mxc.Platform.guest_arch()
+    "#{base}-#{arch}"
   end
 
   defp average_metrics(snapshots) do

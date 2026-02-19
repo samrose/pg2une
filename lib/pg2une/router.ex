@@ -55,8 +55,29 @@ defmodule Pg2une.Router do
 
   # Current PostgreSQL config on target
   get "/api/config" do
-    # Would query target PG for current settings
-    send_json(conn, 200, %{config: %{}})
+    params = Map.keys(Pg2une.PgConnector.param_mapping())
+
+    config = case Pg2une.PgConnector.read_current_config(params) do
+      {:ok, values} -> values
+      {:error, _} -> %{}
+    end
+
+    send_json(conn, 200, %{config: config})
+  end
+
+  # Current analysis/detection state from Datalox fact store
+  get "/api/analysis" do
+    analysis = %{
+      cusum_degradations: format_facts(Anytune.query(:pg2une, {:cusum_degradation, [:_, :_]})),
+      otava_change_points: format_facts(Anytune.query(:pg2une, {:otava_change_point, [:_, :_]})),
+      prophet_forecasts: format_facts(Anytune.query(:pg2une, {:prophet_forecast, [:_, :_, :_, :_]})),
+      usl_deviation: format_facts(Anytune.query(:pg2une, {:usl_deviation, [:_]})),
+      high_confidence: Anytune.query(:pg2une, {:high_confidence, []}) != [],
+      should_act: format_facts(Anytune.query(:pg2une, {:should_act, [:_]})),
+      metric_values: format_facts(Anytune.query(:pg2une, {:metric_value, [:_, :_]}))
+    }
+
+    send_json(conn, 200, %{analysis: analysis})
   end
 
   # Trigger optimization
@@ -82,6 +103,9 @@ defmodule Pg2une.Router do
         id: r.id,
         action: r.action,
         status: r.status,
+        config: r.config,
+        baseline_metrics: r.baseline_metrics,
+        result_metrics: r.result_metrics,
         improvement_pct: r.improvement_pct,
         created_at: r.inserted_at
       }
@@ -139,4 +163,12 @@ defmodule Pg2une.Router do
   defp get_query_param(conn, key, default) do
     conn.query_params[key] || default
   end
+
+  defp format_facts(facts) when is_list(facts) do
+    Enum.map(facts, fn {predicate, args} ->
+      %{predicate: predicate, args: args}
+    end)
+  end
+
+  defp format_facts(_), do: []
 end

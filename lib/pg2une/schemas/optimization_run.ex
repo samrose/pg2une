@@ -2,6 +2,9 @@ defmodule Pg2une.Schemas.OptimizationRun do
   use Ecto.Schema
   import Ecto.Changeset
 
+  @derive {Jason.Encoder, only: [:id, :action, :status, :config, :baseline_metrics,
+    :result_metrics, :improvement_pct, :deployment_state, :canary_workload_id,
+    :inserted_at, :updated_at]}
   schema "optimization_runs" do
     field :action, :string
     field :status, :string

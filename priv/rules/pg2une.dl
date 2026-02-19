@@ -31,3 +31,13 @@ suppress_action() :-
 should_act(Action) :-
     action_ready(Action),
     not suppress_action().
+
+% E-Divisive confirmed a significant change point
+otava_confirmed(Metric) :-
+    otava_change_point(Metric, Magnitude),
+    Magnitude > 0.10.
+
+% USL model shows performance below expected
+usl_warning() :-
+    usl_deviation(Dev),
+    Dev < -0.15.

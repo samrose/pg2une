@@ -6,7 +6,7 @@
   microvm = {
     vcpu = 4;
     mem = 2048;
-    hypervisor = "qemu";
+    # hypervisor is selected at build time by mxc based on host platform
   };
 
   networking.hostName = "pg2une-postgres-replica";

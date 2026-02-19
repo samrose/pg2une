@@ -33,8 +33,8 @@ defmodule Pg2une.QueryRegression do
   end
 
   defp check_regression(metric, baseline) do
-    avg_exec = baseline.avg_exec_time
-    avg_calls = baseline.avg_calls
+    avg_exec = to_float(baseline.avg_exec_time)
+    avg_calls = to_float(baseline.avg_calls)
 
     if avg_exec == nil or avg_exec == 0 do
       []
@@ -61,6 +61,10 @@ defmodule Pg2une.QueryRegression do
       end
     end
   end
+
+  defp to_float(%Decimal{} = d), do: Decimal.to_float(d)
+  defp to_float(n) when is_number(n), do: n / 1
+  defp to_float(nil), do: nil
 
   defp assert_regressions(regressions) do
     # Retract old query_regression facts and assert new ones

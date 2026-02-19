@@ -30,4 +30,22 @@ defmodule Pg2une.DeploymentManagerTest do
 
     assert {:validating, :holistic} = GenServer.call(name, :status)
   end
+
+  test "defaults to direct mode", %{name: name} do
+    state = :sys.get_state(name)
+    assert state.mode == :direct
+  end
+
+  test "can be started with canary mode" do
+    name = :"dm_canary_#{:erlang.unique_integer([:positive])}"
+    {:ok, _pid} = GenServer.start_link(DeploymentManager, [mode: :canary], name: name)
+
+    state = :sys.get_state(name)
+    assert state.mode == :canary
+  end
+
+  test "struct includes mode field" do
+    state = %DeploymentManager{}
+    assert Map.has_key?(state, :mode)
+  end
 end

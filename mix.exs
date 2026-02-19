@@ -30,7 +30,7 @@ defmodule Pg2une.MixProject do
   defp deps do
     [
       {:anytune, github: "samrose/anytune"},
-      {:mxc, github: "samrose/mxc", runtime: false},
+      {:mxc, github: "samrose/mxc"},
       {:datalox, github: "samrose/datalox"},
       {:postgrex, ">= 0.0.0"},
       {:ecto_sql, "~> 3.13"},

@@ -5,7 +5,7 @@
   microvm = {
     vcpu = 1;
     mem = 256;
-    hypervisor = "qemu";
+    # hypervisor is selected at build time by mxc based on host platform
   };
 
   networking.hostName = "pg2une-pgbouncer";
