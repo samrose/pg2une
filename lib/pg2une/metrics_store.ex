@@ -8,7 +8,7 @@ defmodule Pg2une.MetricsStore do
 
   import Ecto.Query
   alias Pg2une.Repo
-  alias Pg2une.Schemas.{SystemSnapshot, WorkloadSnapshot, OptimizerObservation, OptimizationRun}
+  alias Pg2une.Schemas.{SystemSnapshot, SystemSnapshotHourly, WorkloadSnapshot, OptimizerObservation, OptimizationRun}
 
   def record_system_snapshot(metrics) when is_map(metrics) do
     attrs = Map.put(metrics, "snapshot_time", DateTime.utc_now())
@@ -92,6 +92,69 @@ defmodule Pg2une.MetricsStore do
       limit: ^limit
     )
     |> Repo.all()
+  end
+
+  @doc """
+  Archives minute-level snapshots older than 30 days into hourly aggregates,
+  then deletes the originals. Keeps system_snapshots lean while preserving
+  long-term trends in system_snapshots_hourly.
+  """
+  def archive_old_snapshots do
+    cutoff = DateTime.add(DateTime.utc_now(), -30 * 24 * 60 * 60, :second)
+
+    hourly =
+      from(s in SystemSnapshot,
+        where: s.snapshot_time < ^cutoff,
+        group_by: fragment("date_trunc('hour', ?)", s.snapshot_time),
+        select: %{
+          hour: fragment("date_trunc('hour', ?)", s.snapshot_time),
+          tps_avg: avg(s.tps),
+          tps_max: max(s.tps),
+          conn_active_avg: type(avg(s.conn_active), :float),
+          buffer_hit_ratio_avg: avg(s.buffer_hit_ratio),
+          latency_p99_avg: avg(s.latency_p99),
+          latency_p99_max: max(s.latency_p99),
+          sample_count: count(s.id)
+        }
+      )
+      |> Repo.all()
+
+    if hourly == [] do
+      :ok
+    else
+      entries =
+        Enum.map(hourly, fn row ->
+          hour =
+            case row.hour do
+              %DateTime{} = dt -> dt
+              %NaiveDateTime{} = ndt -> DateTime.from_naive!(ndt, "Etc/UTC")
+            end
+
+          %{
+            hour: hour,
+            tps_avg: row.tps_avg,
+            tps_max: row.tps_max,
+            conn_active_avg: row.conn_active_avg,
+            buffer_hit_ratio_avg: row.buffer_hit_ratio_avg,
+            latency_p99_avg: row.latency_p99_avg,
+            latency_p99_max: row.latency_p99_max,
+            sample_count: row.sample_count
+          }
+        end)
+
+      Repo.insert_all(SystemSnapshotHourly, entries,
+        on_conflict: :nothing,
+        conflict_target: [:hour]
+      )
+
+      {deleted, _} =
+        from(s in SystemSnapshot, where: s.snapshot_time < ^cutoff)
+        |> Repo.delete_all()
+
+      require Logger
+      Logger.info("MetricsStore: archived #{length(entries)} hourly buckets, deleted #{deleted} minute-level snapshots")
+      :ok
+    end
   end
 
   def prior_observations(opts \\ []) do

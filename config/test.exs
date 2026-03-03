@@ -18,3 +18,8 @@ config :mxc, mode: :standalone
 
 # Disable swoosh (transitive dep from mxc) in test
 config :swoosh, :api_client, false
+
+# Wire Mox mocks for PeriodicAnalyzer
+config :pg2une,
+  anytune_client: Pg2une.MockAnytuneClient,
+  fact_store_client: Pg2une.MockFactStoreClient

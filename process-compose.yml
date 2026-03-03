@@ -50,3 +50,52 @@ processes:
         condition: process_completed_successfully
     shutdown:
       signal: 2
+
+  # Optional workload generators — disabled by default.
+  # Start with: process-compose up workload-oltp
+  # Or: PG2UNE_BENCH_DURATION=600 process-compose up workload-mixed
+
+  workload-init:
+    command: pg2une-bench init
+    depends_on:
+      db-setup:
+        condition: process_completed_successfully
+    availability:
+      restart: "no"
+    disabled: true
+
+  workload-oltp:
+    command: pg2une-bench oltp
+    depends_on:
+      workload-init:
+        condition: process_completed_successfully
+      app:
+        condition: process_started
+    disabled: true
+
+  workload-olap:
+    command: pg2une-bench olap
+    depends_on:
+      workload-init:
+        condition: process_completed_successfully
+      app:
+        condition: process_started
+    disabled: true
+
+  workload-mixed:
+    command: pg2une-bench mixed
+    depends_on:
+      workload-init:
+        condition: process_completed_successfully
+      app:
+        condition: process_started
+    disabled: true
+
+  workload-degrade:
+    command: pg2une-bench degrade
+    depends_on:
+      workload-init:
+        condition: process_completed_successfully
+      app:
+        condition: process_started
+    disabled: true

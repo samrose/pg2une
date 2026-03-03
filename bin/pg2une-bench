@@ -1,0 +1,285 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DB_HOST="${PGHOST:-localhost}"
+DB_PORT="${PGPORT:-5432}"
+DB_NAME="${PGDATABASE:-postgres}"
+DB_USER="${PGUSER:-$(whoami)}"
+CONN="-h $DB_HOST -p $DB_PORT -d $DB_NAME -U $DB_USER"
+SCALE="${PG2UNE_BENCH_SCALE:-10}"
+
+usage() {
+  cat <<'EOF'
+pg2une-bench — generate real PostgreSQL workloads for pg2une tuning
+
+Usage: pg2une-bench <command> [options]
+
+Commands:
+  init              Initialize pgbench tables (scale factor from PG2UNE_BENCH_SCALE, default 10)
+  oltp              OLTP workload: high concurrency, short transactions
+  olap              OLAP workload: few connections, heavy analytical queries
+  mixed             Mixed workload: OLTP + OLAP in parallel
+  stress            Stress test: push connections and throughput to limits
+  degrade           Start good, then inject a bad config to trigger detection
+  stop              Stop all running pg2une-bench workloads
+
+Options (env vars):
+  PG2UNE_BENCH_SCALE     pgbench scale factor (default: 10, ~1.5MB per scale)
+  PG2UNE_BENCH_DURATION  workload duration in seconds (default: 300)
+  PG2UNE_BENCH_CLIENTS   number of pgbench clients (default: varies by profile)
+  PGHOST                 target host (default: localhost)
+  PGPORT                 target port (default: 5432)
+  PGDATABASE             target database (default: postgres)
+  PGUSER                 target user (default: current user)
+
+Examples:
+  pg2une-bench init                    # set up pgbench tables
+  pg2une-bench oltp                    # run OLTP for 5 minutes
+  PG2UNE_BENCH_DURATION=600 pg2une-bench mixed   # 10 minute mixed workload
+  pg2une-bench degrade                 # trigger detection + auto-tuning
+EOF
+  exit 1
+}
+
+DURATION="${PG2UNE_BENCH_DURATION:-300}"
+PIDFILE="/tmp/pg2une-bench.pids"
+
+log() { echo "[pg2une-bench] $*"; }
+
+ensure_init() {
+  if ! psql $CONN -c "SELECT 1 FROM pgbench_accounts LIMIT 1" &>/dev/null; then
+    log "pgbench tables not found, initializing (scale=$SCALE)..."
+    cmd_init
+  fi
+}
+
+save_pid() {
+  echo "$1" >> "$PIDFILE"
+}
+
+cmd_init() {
+  log "Initializing pgbench tables with scale factor $SCALE..."
+  pgbench $CONN -i -s "$SCALE" --quiet
+  log "Done. Tables: pgbench_accounts (~$(( SCALE * 100000 )) rows), pgbench_branches, pgbench_tellers, pgbench_history"
+}
+
+cmd_oltp() {
+  ensure_init
+  local clients="${PG2UNE_BENCH_CLIENTS:-20}"
+  local jobs=$(( clients > 4 ? 4 : clients ))
+
+  log "OLTP workload: $clients clients, $jobs threads, ${DURATION}s"
+  log "  Profile: default TPC-B-like (short read-write transactions)"
+
+  pgbench $CONN \
+    --client="$clients" \
+    --jobs="$jobs" \
+    --time="$DURATION" \
+    --no-vacuum \
+    --progress=30 \
+    --report-per-command &
+  save_pid $!
+
+  wait
+  log "OLTP workload finished"
+}
+
+cmd_olap() {
+  ensure_init
+  local clients="${PG2UNE_BENCH_CLIENTS:-4}"
+
+  log "OLAP workload: $clients clients, ${DURATION}s"
+  log "  Profile: heavy aggregations, sorts, hash joins"
+
+  # Create a custom OLAP script
+  local script=$(mktemp /tmp/pg2une-olap-XXXXXX.sql)
+  cat > "$script" <<'SQL'
+-- Full table scan with aggregation
+SELECT count(*), avg(abalance), min(abalance), max(abalance), stddev(abalance)
+FROM pgbench_accounts;
+
+-- Heavy sort
+SELECT aid, abalance FROM pgbench_accounts ORDER BY abalance DESC LIMIT 1000;
+
+-- Hash join between accounts and tellers
+SELECT a.aid, a.abalance, t.tbalance
+FROM pgbench_accounts a
+JOIN pgbench_tellers t ON a.bid = t.bid
+WHERE a.abalance > 0
+LIMIT 5000;
+
+-- Subquery with aggregation
+SELECT bid, total_balance, acct_count
+FROM (
+  SELECT bid, sum(abalance) as total_balance, count(*) as acct_count
+  FROM pgbench_accounts
+  GROUP BY bid
+) sub
+ORDER BY total_balance DESC;
+
+-- Window function
+SELECT aid, abalance,
+       avg(abalance) OVER (PARTITION BY bid) as branch_avg,
+       rank() OVER (PARTITION BY bid ORDER BY abalance DESC) as branch_rank
+FROM pgbench_accounts
+WHERE bid <= 5
+LIMIT 2000;
+SQL
+
+  pgbench $CONN \
+    --client="$clients" \
+    --jobs=2 \
+    --time="$DURATION" \
+    --no-vacuum \
+    --file="$script" \
+    --progress=30 \
+    --report-per-command &
+  save_pid $!
+
+  wait
+  rm -f "$script"
+  log "OLAP workload finished"
+}
+
+cmd_mixed() {
+  ensure_init
+  local oltp_clients="${PG2UNE_BENCH_CLIENTS:-12}"
+  local olap_clients=4
+
+  log "Mixed workload: $oltp_clients OLTP + $olap_clients OLAP clients, ${DURATION}s"
+
+  # OLTP portion
+  pgbench $CONN \
+    --client="$oltp_clients" \
+    --jobs=4 \
+    --time="$DURATION" \
+    --no-vacuum \
+    --progress=30 &
+  save_pid $!
+
+  # OLAP portion
+  local script=$(mktemp /tmp/pg2une-olap-XXXXXX.sql)
+  cat > "$script" <<'SQL'
+SELECT count(*), avg(abalance), min(abalance), max(abalance) FROM pgbench_accounts;
+SELECT bid, sum(abalance) as total, count(*) FROM pgbench_accounts GROUP BY bid ORDER BY total DESC;
+SELECT aid, abalance, avg(abalance) OVER (PARTITION BY bid) FROM pgbench_accounts WHERE bid <= 3 LIMIT 1000;
+SQL
+
+  pgbench $CONN \
+    --client="$olap_clients" \
+    --jobs=2 \
+    --time="$DURATION" \
+    --no-vacuum \
+    --file="$script" &
+  save_pid $!
+
+  wait
+  rm -f "$script"
+  log "Mixed workload finished"
+}
+
+cmd_stress() {
+  ensure_init
+  local clients="${PG2UNE_BENCH_CLIENTS:-50}"
+  local jobs=$(( clients > 8 ? 8 : clients ))
+
+  log "Stress workload: $clients clients, $jobs threads, ${DURATION}s"
+  log "  This will push the connection pool and throughput to limits"
+
+  pgbench $CONN \
+    --client="$clients" \
+    --jobs="$jobs" \
+    --time="$DURATION" \
+    --no-vacuum \
+    --progress=10 \
+    --report-per-command &
+  save_pid $!
+
+  wait
+  log "Stress workload finished"
+}
+
+cmd_degrade() {
+  ensure_init
+
+  local phase_duration=$(( DURATION / 3 ))
+  if [ "$phase_duration" -lt 60 ]; then
+    phase_duration=60
+  fi
+
+  log "Degrade scenario (3 phases, ${phase_duration}s each):"
+  log "  Phase 1: Normal workload with good config"
+  log "  Phase 2: Inject bad config (work_mem=64kB, random_page_cost=100)"
+  log "  Phase 3: Keep bad config — pg2une should detect & fix"
+  log ""
+  log "  Total: $(( phase_duration * 3 ))s. Watch: curl localhost:4080/api/analysis"
+
+  # Start continuous workload in background
+  pgbench $CONN \
+    --client=15 \
+    --jobs=4 \
+    --time=$(( phase_duration * 3 )) \
+    --no-vacuum \
+    --progress=15 &
+  local bench_pid=$!
+  save_pid $bench_pid
+
+  # Phase 1: let it run with current (hopefully decent) config
+  log ""
+  log "=== Phase 1: baseline (${phase_duration}s) ==="
+  sleep "$phase_duration"
+
+  # Phase 2: inject terrible config
+  log ""
+  log "=== Phase 2: injecting bad config ==="
+  psql $CONN -c "ALTER SYSTEM SET work_mem = '64kB';" 2>/dev/null
+  psql $CONN -c "ALTER SYSTEM SET random_page_cost = 100;" 2>/dev/null
+  psql $CONN -c "ALTER SYSTEM SET effective_cache_size = '32MB';" 2>/dev/null
+  psql $CONN -c "SELECT pg_reload_conf();" 2>/dev/null
+  log "  Bad config applied: work_mem=64kB, random_page_cost=100, effective_cache_size=32MB"
+  log "  Waiting ${phase_duration}s for pg2une to detect degradation..."
+  sleep "$phase_duration"
+
+  # Phase 3: pg2une should detect and fix
+  log ""
+  log "=== Phase 3: waiting for pg2une to detect & optimize ==="
+  log "  Check: curl -s localhost:4080/api/analysis | jq .analysis.high_confidence"
+  log "  Check: curl -s localhost:4080/api/analysis | jq .analysis.cusum_degradations"
+  sleep "$phase_duration"
+
+  wait "$bench_pid" 2>/dev/null || true
+
+  log ""
+  log "Degrade scenario finished. Check results:"
+  log "  curl -s localhost:4080/api/config | jq"
+  log "  curl -s localhost:4080/api/optimizations | jq"
+  log "  curl -s localhost:4080/api/analysis | jq"
+}
+
+cmd_stop() {
+  if [ -f "$PIDFILE" ]; then
+    while read -r pid; do
+      if kill -0 "$pid" 2>/dev/null; then
+        log "Stopping PID $pid"
+        kill "$pid" 2>/dev/null || true
+      fi
+    done < "$PIDFILE"
+    rm -f "$PIDFILE"
+    log "All workloads stopped"
+  else
+    log "No running workloads found"
+  fi
+}
+
+# Main
+case "${1:-}" in
+  init)       cmd_init ;;
+  oltp)       cmd_oltp ;;
+  olap)       cmd_olap ;;
+  mixed)      cmd_mixed ;;
+  stress)     cmd_stress ;;
+  degrade)    cmd_degrade ;;
+  stop)       cmd_stop ;;
+  -h|--help)  usage ;;
+  *)          echo "Unknown command: ${1:-}" >&2; usage ;;
+esac

@@ -55,7 +55,7 @@
               .venv/bin/pip install --quiet $DEPS_VERSION
               echo "$DEPS_VERSION" > "$DEPS_MARKER"
             fi
-            export PATH="$PWD/.venv/bin:$PATH"
+            export PATH="$PWD/.venv/bin:$PWD/bin:$PATH"
           '';
         };
       }

@@ -35,7 +35,8 @@ defmodule Pg2une.MixProject do
       {:postgrex, ">= 0.0.0"},
       {:ecto_sql, "~> 3.13"},
       {:plug_cowboy, "~> 2.7"},
-      {:jason, "~> 1.4"}
+      {:jason, "~> 1.4"},
+      {:mox, "~> 1.0", only: :test}
     ]
   end
 

@@ -5,7 +5,8 @@ defmodule Pg2une.PeriodicAnalyzer do
   Schedules:
   - E-Divisive change point detection: every 5 minutes (needs 20+ data points)
   - USL scalability modeling: every 5 minutes (needs 5+ data points)
-  - Prophet forecasting: every 30 minutes (needs 24+ data points)
+  - Prophet forecasting: every 30 minutes over a 7-day window, bucketed to 15-min resolution (needs 192+ buckets = 2 days minimum)
+  - Metrics archival: daily — aggregates minute-level data older than 30 days into hourly records
   - Confidence recalculation: after each E-Divisive or USL run
 
   Asserts results as Datalox facts so that Datalog rules
@@ -15,13 +16,18 @@ defmodule Pg2une.PeriodicAnalyzer do
   use GenServer
   require Logger
 
+  @anytune Application.compile_env(:pg2une, :anytune_client, Anytune)
+  @fact_store Application.compile_env(:pg2une, :fact_store_client, Anytune.FactStore)
+
   @edivisive_interval 5 * 60_000
   @usl_interval 5 * 60_000
   @prophet_interval 30 * 60_000
+  @archive_interval 24 * 60 * 60_000
 
   @edivisive_min_points 20
   @usl_min_points 5
-  @prophet_min_points 24
+  # Minimum 15-min buckets after aggregation — 192 = 2 full days, enough for daily seasonality
+  @prophet_min_buckets 192
 
   @metrics_to_analyze ["tps", "latency_p99", "buffer_hit_ratio"]
 
@@ -34,6 +40,7 @@ defmodule Pg2une.PeriodicAnalyzer do
     schedule(:edivisive, @edivisive_interval)
     schedule(:usl, @usl_interval)
     schedule(:prophet, @prophet_interval)
+    schedule(:archive, @archive_interval)
 
     {:ok, %{
       usl_params: nil,
@@ -63,9 +70,17 @@ defmodule Pg2une.PeriodicAnalyzer do
     {:noreply, state}
   end
 
+  @impl true
+  def handle_info(:archive, state) do
+    Pg2une.MetricsStore.archive_old_snapshots()
+    schedule(:archive, @archive_interval)
+    {:noreply, state}
+  end
+
   # ── E-Divisive Change Point Detection ────────────────────────────────
 
-  defp run_edivisive(state) do
+  @doc false
+  def run_edivisive(state) do
     snapshots = Pg2une.MetricsStore.recent_system_metrics(30)
 
     if length(snapshots) < @edivisive_min_points do
@@ -76,7 +91,7 @@ defmodule Pg2une.PeriodicAnalyzer do
         Enum.reduce(@metrics_to_analyze, %{}, fn metric, acc ->
           values = extract_metric_values(snapshots, metric)
 
-          case Anytune.edivisive(:pg2une, metric, values) do
+          case @anytune.edivisive(:pg2une, metric, values) do
             {:ok, result} ->
               points = result["change_points"] || []
 
@@ -109,7 +124,8 @@ defmodule Pg2une.PeriodicAnalyzer do
 
   # ── USL Scalability Modeling ─────────────────────────────────────────
 
-  defp run_usl(state) do
+  @doc false
+  def run_usl(state) do
     snapshots = Pg2une.MetricsStore.recent_system_metrics(30)
 
     if length(snapshots) < @usl_min_points do
@@ -119,7 +135,7 @@ defmodule Pg2une.PeriodicAnalyzer do
       concurrency = Enum.map(snapshots, fn s -> (s.conn_active || 1) / 1.0 end)
       throughput = Enum.map(snapshots, fn s -> (s.tps || 0) / 1.0 end)
 
-      case Anytune.usl(:pg2une, :fit, %{"concurrency" => concurrency, "throughput" => throughput}) do
+      case @anytune.usl(:pg2une, :fit, %{"concurrency" => concurrency, "throughput" => throughput}) do
         {:ok, fit_result} ->
           alpha = fit_result["alpha"] || 0
           beta = fit_result["beta"] || 0
@@ -130,7 +146,7 @@ defmodule Pg2une.PeriodicAnalyzer do
           current_conn = (latest.conn_active || 1) / 1.0
           current_tps = (latest.tps || 0) / 1.0
 
-          case Anytune.usl(:pg2une, :deviation, %{
+          case @anytune.usl(:pg2une, :deviation, %{
             "alpha" => alpha,
             "beta" => beta,
             "max_throughput" => max_throughput,
@@ -164,32 +180,29 @@ defmodule Pg2une.PeriodicAnalyzer do
 
   # ── Prophet Forecasting ──────────────────────────────────────────────
 
-  defp run_prophet do
-    snapshots = Pg2une.MetricsStore.recent_system_metrics(360)
+  @doc false
+  def run_prophet do
+    snapshots = Pg2une.MetricsStore.recent_system_metrics(10_080)
+    buckets = Pg2une.MetricsBucketer.bucket_to_15min(snapshots)
 
-    if length(snapshots) < @prophet_min_points do
-      Logger.debug("PeriodicAnalyzer: Prophet skipped, only #{length(snapshots)} points (need #{@prophet_min_points})")
+    if length(buckets) < @prophet_min_buckets do
+      Logger.debug("PeriodicAnalyzer: Prophet skipped, only #{length(buckets)} 15-min buckets (need #{@prophet_min_buckets})")
       :ok
     else
       Enum.each(@metrics_to_analyze, fn metric ->
-        timestamps =
-          Enum.map(snapshots, fn s ->
-            DateTime.to_iso8601(s.snapshot_time)
-          end)
+        timestamps = Enum.map(buckets, fn b -> DateTime.to_iso8601(b.snapshot_time) end)
+        values = extract_metric_values(buckets, metric)
 
-        values = extract_metric_values(snapshots, metric)
-
-        case Anytune.forecast(:pg2une, metric,
+        case @anytune.forecast(:pg2une, metric,
           timestamps: timestamps,
           values: values,
-          periods: 24,
-          freq: "H"
+          periods: 96,
+          freq: "15min"
         ) do
           {:ok, result} ->
             forecasts = result["forecast"] || []
 
             if forecasts != [] do
-              # Use the next-period forecast
               next = List.first(forecasts)
               yhat = next["yhat"] || 0
               lower = next["yhat_lower"] || 0
@@ -210,7 +223,7 @@ defmodule Pg2une.PeriodicAnalyzer do
 
   defp recalculate_confidence(state) do
     # Count CUSUM degradations from fact store
-    cusum_facts = Anytune.query(:pg2une, {:cusum_degradation, [:_, :_]})
+    cusum_facts = @anytune.query(:pg2une, {:cusum_degradation, [:_, :_]})
     cusum_count = length(cusum_facts)
 
     # Check if E-Divisive confirmed change points
@@ -220,8 +233,8 @@ defmodule Pg2une.PeriodicAnalyzer do
     usl_dev = state.last_usl_deviation || 0.0
 
     # Check for seasonal unexpectedness
-    seasonal_facts = Anytune.query(:pg2une, {:seasonal_expected, [:_, :_]})
-    metric_values = Anytune.query(:pg2une, {:metric_value, [:_, :_]})
+    seasonal_facts = @anytune.query(:pg2une, {:seasonal_expected, [:_, :_]})
+    metric_values = @anytune.query(:pg2une, {:metric_value, [:_, :_]})
 
     seasonal_unexpected = check_seasonal_unexpected(metric_values, seasonal_facts)
 
@@ -237,32 +250,32 @@ defmodule Pg2une.PeriodicAnalyzer do
     Logger.info("PeriodicAnalyzer: confidence=#{Float.round(confidence, 3)} (cusum=#{cusum_count}, otava=#{otava_confirms}, usl_dev=#{Float.round(usl_dev, 4)}, seasonal=#{seasonal_unexpected})")
 
     if confidence >= 0.30 do
-      Anytune.FactStore.replace_facts(:pg2une_store, :high_confidence, 0, [{:high_confidence, []}])
+      @fact_store.replace_facts(:pg2une_store, :high_confidence, 0, [{:high_confidence, []}])
     else
-      Anytune.FactStore.replace_facts(:pg2une_store, :high_confidence, 0, [])
+      @fact_store.replace_facts(:pg2une_store, :high_confidence, 0, [])
     end
   end
 
   # ── Fact Store Helpers ───────────────────────────────────────────────
 
   defp assert_change_point(metric, magnitude) do
-    Anytune.FactStore.assert_fact(:pg2une_store, {:otava_change_point, [metric, magnitude]})
+    @fact_store.assert_fact(:pg2une_store, {:otava_change_point, [metric, magnitude]})
   end
 
   defp retract_change_point(metric) do
-    existing = Anytune.FactStore.query(:pg2une_store, {:otava_change_point, [metric, :_]})
+    existing = @fact_store.query(:pg2une_store, {:otava_change_point, [metric, :_]})
 
     Enum.each(existing, fn fact ->
-      Anytune.FactStore.retract_fact(:pg2une_store, fact)
+      @fact_store.retract_fact(:pg2une_store, fact)
     end)
   end
 
   defp assert_usl_deviation(deviation) do
-    Anytune.FactStore.replace_facts(:pg2une_store, :usl_deviation, 1, [{:usl_deviation, [deviation]}])
+    @fact_store.replace_facts(:pg2une_store, :usl_deviation, 1, [{:usl_deviation, [deviation]}])
   end
 
   defp assert_prophet_forecast(metric, yhat, lower, upper) do
-    Anytune.FactStore.assert_fact(:pg2une_store, {:prophet_forecast, [metric, yhat, lower, upper]})
+    @fact_store.assert_fact(:pg2une_store, {:prophet_forecast, [metric, yhat, lower, upper]})
   end
 
   # ── Helpers ──────────────────────────────────────────────────────────
