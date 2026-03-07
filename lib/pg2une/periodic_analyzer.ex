@@ -278,12 +278,25 @@ defmodule Pg2une.PeriodicAnalyzer do
     @fact_store.assert_fact(:pg2une_store, {:prophet_forecast, [metric, yhat, lower, upper]})
   end
 
+  defp assert_prophet_anomaly(metric) do
+    @fact_store.replace_facts(:pg2une_store, :"prophet_anomaly_#{metric}", 1, [{:prophet_anomaly, [metric]}])
+  end
+
+  defp retract_prophet_anomaly(metric) do
+    @fact_store.replace_facts(:pg2une_store, :"prophet_anomaly_#{metric}", 1, [])
+  end
+
   # ── Helpers ──────────────────────────────────────────────────────────
 
   defp extract_metric_values(snapshots, "tps"), do: Enum.map(snapshots, &((&1.tps || 0) / 1.0))
   defp extract_metric_values(snapshots, "latency_p99"), do: Enum.map(snapshots, &((&1.latency_p99 || 0) / 1.0))
   defp extract_metric_values(snapshots, "buffer_hit_ratio"), do: Enum.map(snapshots, &((&1.buffer_hit_ratio || 0) / 1.0))
   defp extract_metric_values(snapshots, _), do: Enum.map(snapshots, fn _ -> 0.0 end)
+
+  defp extract_metric_value(snapshot, "tps"), do: (snapshot.tps || 0) / 1.0
+  defp extract_metric_value(snapshot, "latency_p99"), do: (snapshot.latency_p99 || 0) / 1.0
+  defp extract_metric_value(snapshot, "buffer_hit_ratio"), do: (snapshot.buffer_hit_ratio || 0) / 1.0
+  defp extract_metric_value(_snapshot, _), do: 0.0
 
   defp check_seasonal_unexpected(metric_values, seasonal_facts) do
     # Check if any current metric value is outside the seasonal expected range
